@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type Room = {
@@ -27,6 +28,37 @@ type PlayersResponse = {
   players: Player[];
 };
 
+const PLAYER_ID_STORAGE_KEY = "ill-ilan-player-ids-by-room";
+
+const getStoredPlayerIdsByRoom = () => {
+  if (typeof window === "undefined") {
+    return {} as Record<string, string>;
+  }
+
+  const raw = window.localStorage.getItem(PLAYER_ID_STORAGE_KEY);
+  if (!raw) {
+    return {} as Record<string, string>;
+  }
+
+  try {
+    return JSON.parse(raw) as Record<string, string>;
+  } catch {
+    return {} as Record<string, string>;
+  }
+};
+
+const setStoredPlayerId = (roomId: string, playerId: string) => {
+  const map = getStoredPlayerIdsByRoom();
+  map[roomId] = playerId;
+  window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, JSON.stringify(map));
+};
+
+const removeStoredPlayerId = (roomId: string) => {
+  const map = getStoredPlayerIdsByRoom();
+  delete map[roomId];
+  window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, JSON.stringify(map));
+};
+
 const createErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
     return error.message;
@@ -35,6 +67,7 @@ const createErrorMessage = (error: unknown) => {
 };
 
 export default function Home() {
+  const router = useRouter();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -50,7 +83,14 @@ export default function Home() {
     () => rooms.find((room) => room.id === selectedRoomId) ?? null,
     [rooms, selectedRoomId],
   );
-
+  const isCurrentPlayerInSelectedRoom = useMemo(
+    () => (currentPlayerId ? players.some((player) => player.id === currentPlayerId) : false),
+    [currentPlayerId, players],
+  );
+  const isCurrentPlayerHostInSelectedRoom = useMemo(
+    () => (currentPlayerId ? players.some((player) => player.id === currentPlayerId && player.is_host) : false),
+    [currentPlayerId, players],
+  );
   const fetchRooms = useCallback(async () => {
     const response = await fetch("/api/rooms", { method: "GET" });
     if (!response.ok) {
@@ -76,8 +116,12 @@ export default function Home() {
   useEffect(() => {
     if (!selectedRoomId) {
       setPlayers([]);
+      setCurrentPlayerId(null);
       return;
     }
+
+    const storedPlayerIds = getStoredPlayerIdsByRoom();
+    setCurrentPlayerId(storedPlayerIds[selectedRoomId] ?? null);
 
     fetchPlayers(selectedRoomId).catch((error) => {
       setErrorMessage(createErrorMessage(error));
@@ -156,6 +200,7 @@ export default function Home() {
       setPlayerName("");
       setJoinPlayerName("");
       setCurrentPlayerId(payload.hostPlayer.id);
+      setStoredPlayerId(payload.room.id, payload.hostPlayer.id);
       setPlayers([payload.hostPlayer]);
       await fetchRooms();
     } catch (error) {
@@ -167,7 +212,10 @@ export default function Home() {
 
   const onJoinRoom: React.FormEventHandler<HTMLFormElement> = async (event) => {
     event.preventDefault();
-    if (!selectedRoomId) {
+    if (!selectedRoomId || isCurrentPlayerInSelectedRoom) {
+      if (isCurrentPlayerInSelectedRoom) {
+        setErrorMessage("この部屋にはすでに参加しています。離脱する場合は離脱ボタンを押してください。");
+      }
       return;
     }
 
@@ -191,8 +239,86 @@ export default function Home() {
       setJoinPlayerName("");
       if (payload.player?.id) {
         setCurrentPlayerId(payload.player.id);
+        setStoredPlayerId(selectedRoomId, payload.player.id);
       }
       await fetchPlayers(selectedRoomId);
+    } catch (error) {
+      setErrorMessage(createErrorMessage(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onLeaveRoom = async () => {
+    if (!selectedRoomId || !currentPlayerId || selectedRoom?.status === "playing") {
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch(`/api/rooms/${selectedRoomId}/leave`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ playerId: currentPlayerId }),
+      });
+
+      const payload = (await response.json()) as { error?: string; roomDeleted?: boolean };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error ?? "部屋からの離脱に失敗しました");
+      }
+
+      setCurrentPlayerId(null);
+      removeStoredPlayerId(selectedRoomId);
+      setJoinPlayerName("");
+
+      if (payload.roomDeleted === true) {
+        setSelectedRoomId(null);
+        setPlayers([]);
+      } else {
+        await fetchPlayers(selectedRoomId);
+      }
+
+      await fetchRooms();
+    } catch (error) {
+      setErrorMessage(createErrorMessage(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onDeleteRoom = async () => {
+    if (
+      !selectedRoomId ||
+      !currentPlayerId ||
+      !isCurrentPlayerHostInSelectedRoom ||
+      selectedRoom?.status === "playing"
+    ) {
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch(`/api/rooms/${selectedRoomId}/delete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ playerId: currentPlayerId }),
+      });
+
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error ?? "部屋の削除に失敗しました");
+      }
+
+      removeStoredPlayerId(selectedRoomId);
+      setCurrentPlayerId(null);
+      setSelectedRoomId(null);
+      setPlayers([]);
+      setJoinPlayerName("");
+      await fetchRooms();
     } catch (error) {
       setErrorMessage(createErrorMessage(error));
     } finally {
@@ -226,6 +352,13 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const onEnterGame = async () => {
+    if (!selectedRoomId || !isCurrentPlayerInSelectedRoom) {
+      return;
+    }
+    router.push(`/game/${selectedRoomId}`);
   };
 
   return (
@@ -335,16 +468,41 @@ export default function Home() {
                     placeholder="参加プレイヤー名"
                     value={joinPlayerName}
                     onChange={(event) => setJoinPlayerName(event.target.value)}
-                    required
+                    required={!isCurrentPlayerInSelectedRoom}
+                    disabled={isCurrentPlayerInSelectedRoom}
                   />
                   <button
                     className="rounded-md bg-zinc-900 px-4 py-2 font-medium text-white disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900"
                     type="submit"
-                    disabled={loading || selectedRoom.status !== "waiting"}
+                    disabled={
+                      loading || selectedRoom.status !== "waiting" || isCurrentPlayerInSelectedRoom
+                    }
                   >
                     参加
                   </button>
                 </form>
+                {isCurrentPlayerInSelectedRoom && selectedRoom.status !== "playing" && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="rounded-md border border-rose-400 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 disabled:opacity-60 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+                      type="button"
+                      onClick={onLeaveRoom}
+                      disabled={loading}
+                    >
+                      離脱
+                    </button>
+                    {isCurrentPlayerHostInSelectedRoom && (
+                      <button
+                        className="rounded-md border border-red-500 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 disabled:opacity-60 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
+                        type="button"
+                        onClick={onDeleteRoom}
+                        disabled={loading}
+                      >
+                        部屋を削除
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 <div>
                   <h3 className="mb-2 font-medium text-zinc-900 dark:text-zinc-100">プレイヤー</h3>
@@ -356,11 +514,8 @@ export default function Home() {
                       >
                         <span className="inline-flex items-center gap-2">
                           {player.is_host && (
-                            <span
-                              className="material-symbols-outlined text-amber-500"
-                              aria-label="ホスト"
-                            >
-                              crown
+                            <span className="material-symbols-outlined text-amber-500">
+                            crown
                             </span>
                           )}
                           <span>
@@ -379,10 +534,14 @@ export default function Home() {
                 <button
                   className="rounded-md bg-emerald-600 px-4 py-2 font-medium text-white disabled:opacity-60"
                   type="button"
-                  onClick={onStartGame}
-                  disabled={loading || selectedRoom.status !== "waiting"}
+                  onClick={selectedRoom.status === "waiting" ? onStartGame : onEnterGame}
+                  disabled={
+                    loading ||
+                    (selectedRoom.status === "playing" && !isCurrentPlayerInSelectedRoom) ||
+                    (selectedRoom.status !== "waiting" && selectedRoom.status !== "playing")
+                  }
                 >
-                  ゲーム開始
+                  {selectedRoom.status === "playing" ? "入室する" : "ゲーム開始"}
                 </button>
               </div>
             )}

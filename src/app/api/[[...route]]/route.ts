@@ -24,6 +24,14 @@ type JoinRoomBody = {
   playerName?: string;
 };
 
+type LeaveRoomBody = {
+  playerId?: string;
+};
+
+type DeleteRoomBody = {
+  playerId?: string;
+};
+
 type StartGameBody = {
   currentPlayerId?: string;
 };
@@ -52,6 +60,21 @@ app.get("/rooms", async (c) => {
   return c.json({ rooms: data ?? [] });
 });
 
+// GET /api/rooms/:roomId
+// 指定部屋の詳細を取得するAPI
+app.get("/rooms/:roomId", async (c) => {
+  const roomId = c.req.param("roomId");
+  const supabase = getSupabaseAdminClient();
+
+  const { data, error } = await supabase.from("rooms").select("*").eq("id", roomId).single();
+
+  if (error) {
+    return c.json({ error: "Room not found" }, 404);
+  }
+
+  return c.json({ room: data });
+});
+
 // GET /api/rooms/:roomId/players
 // 指定部屋のプレイヤー一覧を参加順で取得するAPI
 app.get("/rooms/:roomId/players", async (c) => {
@@ -69,6 +92,25 @@ app.get("/rooms/:roomId/players", async (c) => {
   }
 
   return c.json({ players: data ?? [] });
+});
+
+// GET /api/rooms/:roomId/game-state
+// 指定部屋のゲーム状態を取得するAPI
+app.get("/rooms/:roomId/game-state", async (c) => {
+  const roomId = c.req.param("roomId");
+  const supabase = getSupabaseAdminClient();
+
+  const { data, error } = await supabase
+    .from("game_states")
+    .select("*")
+    .eq("room_id", roomId)
+    .single();
+
+  if (error) {
+    return c.json({ error: error.message }, 404);
+  }
+
+  return c.json({ gameState: data });
 });
 
 // POST /api/rooms
@@ -143,10 +185,6 @@ app.post("/rooms/:roomId/join", async (c) => {
     return c.json({ error: "Room not found" }, 404);
   }
 
-  if (room.status !== "waiting") {
-    return c.json({ error: "This room is not accepting new players" }, 409);
-  }
-
   const { count, error: countError } = await supabase
     .from("players")
     .select("id", { count: "exact", head: true })
@@ -160,12 +198,27 @@ app.post("/rooms/:roomId/join", async (c) => {
     return c.json({ error: "Room is full" }, 409);
   }
 
+  const isFirstPlayer = (count ?? 0) === 0;
+
+  // 空部屋として再オープンするケースでは、finished -> waiting へ戻して参加を許可する
+  if (room.status === "finished" && isFirstPlayer) {
+    const { error: reopenRoomError } = await supabase
+      .from("rooms")
+      .update({ status: "waiting" })
+      .eq("id", roomId);
+    if (reopenRoomError) {
+      return c.json({ error: reopenRoomError.message }, 500);
+    }
+  } else if (room.status !== "waiting") {
+    return c.json({ error: "This room is not accepting new players" }, 409);
+  }
+
   const { data: player, error: playerError } = await supabase
     .from("players")
     .insert({
       room_id: roomId,
       name: playerName,
-      is_host: false,
+      is_host: isFirstPlayer,
     })
     .select("*")
     .single();
@@ -175,6 +228,167 @@ app.post("/rooms/:roomId/join", async (c) => {
   }
 
   return c.json({ player }, 201);
+});
+
+// POST /api/rooms/:roomId/leave
+// 指定部屋からプレイヤーを離脱させるAPI（ホスト離脱時は次ホストに委譲、最後の1人なら部屋削除）
+app.post("/rooms/:roomId/leave", async (c) => {
+  const roomId = c.req.param("roomId");
+  const body = await parseJsonBody<LeaveRoomBody>(c.req.raw);
+  const playerId = body?.playerId;
+
+  if (!playerId) {
+    return c.json({ error: "playerId is required" }, 400);
+  }
+
+  const supabase = getSupabaseAdminClient();
+
+  const { data: leavingPlayer, error: playerLookupError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("id", playerId)
+    .eq("room_id", roomId)
+    .single();
+
+  if (playerLookupError || !leavingPlayer) {
+    return c.json({ error: "Player not found in this room" }, 404);
+  }
+
+  const { data: room, error: roomError } = await supabase
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .single();
+
+  if (roomError || !room) {
+    return c.json({ error: "Room not found" }, 404);
+  }
+
+  const { data: gameState, error: gameStateLookupError } = await supabase
+    .from("game_states")
+    .select("*")
+    .eq("room_id", roomId)
+    .maybeSingle();
+
+  if (gameStateLookupError) {
+    return c.json({ error: gameStateLookupError.message }, 500);
+  }
+
+  const { data: playersBeforeLeave, error: playersBeforeLeaveError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("room_id", roomId)
+    .order("joined_at", { ascending: true });
+
+  if (playersBeforeLeaveError) {
+    return c.json({ error: playersBeforeLeaveError.message }, 500);
+  }
+
+  const remainingPlayersAfterLeave = (playersBeforeLeave ?? []).filter((player) => player.id !== playerId);
+
+  const { error: deletePlayerError } = await supabase.from("players").delete().eq("id", playerId);
+  if (deletePlayerError) {
+    return c.json({ error: deletePlayerError.message }, 500);
+  }
+
+  if (remainingPlayersAfterLeave.length === 0) {
+    const { error: deleteGameStateError } = await supabase
+      .from("game_states")
+      .delete()
+      .eq("room_id", roomId);
+    if (deleteGameStateError) {
+      return c.json({ error: deleteGameStateError.message }, 500);
+    }
+
+    // 最後の1人が離脱した場合、部屋は残しつつwaitingへ戻して再参加可能にする
+    const { error: finishRoomError } = await supabase
+      .from("rooms")
+      .update({ status: "waiting" })
+      .eq("id", roomId);
+    if (finishRoomError) {
+      return c.json({ error: finishRoomError.message }, 500);
+    }
+
+    return c.json({ leftPlayerId: playerId, roomDeleted: true });
+  }
+
+  if (leavingPlayer.is_host) {
+    const nextHost = remainingPlayersAfterLeave[0];
+    const { error: promoteHostError } = await supabase
+      .from("players")
+      .update({ is_host: true })
+      .eq("id", nextHost.id);
+
+    if (promoteHostError) {
+      return c.json({ error: promoteHostError.message }, 500);
+    }
+  }
+
+  if (gameState && gameState.current_player_id === playerId) {
+    const nextPlayer = remainingPlayersAfterLeave[0];
+    const currentEventLog = Array.isArray(gameState.event_log) ? gameState.event_log : [];
+    const { error: updateGameStateError } = await supabase
+      .from("game_states")
+      .update({
+        current_player_id: nextPlayer?.id ?? null,
+        event_log: [...currentEventLog, `${leavingPlayer.name} が離脱しました`],
+      })
+      .eq("room_id", roomId);
+    if (updateGameStateError) {
+      return c.json({ error: updateGameStateError.message }, 500);
+    }
+  }
+
+  return c.json({ leftPlayerId: playerId, roomDeleted: false });
+});
+
+// POST /api/rooms/:roomId/delete
+// ホスト本人のみ部屋を削除できるAPI
+app.post("/rooms/:roomId/delete", async (c) => {
+  const roomId = c.req.param("roomId");
+  const body = await parseJsonBody<DeleteRoomBody>(c.req.raw);
+  const playerId = body?.playerId;
+
+  if (!playerId) {
+    return c.json({ error: "playerId is required" }, 400);
+  }
+
+  const supabase = getSupabaseAdminClient();
+
+  const { data: hostPlayer, error: hostLookupError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("id", playerId)
+    .eq("room_id", roomId)
+    .single();
+
+  if (hostLookupError || !hostPlayer) {
+    return c.json({ error: "Player not found in this room" }, 404);
+  }
+
+  if (!hostPlayer.is_host) {
+    return c.json({ error: "Only host can delete room" }, 403);
+  }
+
+  const { error: deleteGameStateError } = await supabase
+    .from("game_states")
+    .delete()
+    .eq("room_id", roomId);
+  if (deleteGameStateError) {
+    return c.json({ error: deleteGameStateError.message }, 500);
+  }
+
+  const { error: deletePlayersError } = await supabase.from("players").delete().eq("room_id", roomId);
+  if (deletePlayersError) {
+    return c.json({ error: deletePlayersError.message }, 500);
+  }
+
+  const { error: deleteRoomError } = await supabase.from("rooms").delete().eq("id", roomId);
+  if (deleteRoomError) {
+    return c.json({ error: deleteRoomError.message }, 500);
+  }
+
+  return c.json({ deleted: true });
 });
 
 // POST /api/rooms/:roomId/start

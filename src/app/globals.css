@@ -1,5 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@100&icon_names=crown");
 @import "tailwindcss";
-@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=crown");
 
 :root {
   --background: #ffffff;
@@ -27,9 +27,5 @@ body {
 }
 
 .material-symbols-outlined {
-  font-variation-settings:
-    "FILL" 1,
-    "wght" 500,
-    "GRAD" 0,
-    "opsz" 24;
+  font-weight: 100;
 }
