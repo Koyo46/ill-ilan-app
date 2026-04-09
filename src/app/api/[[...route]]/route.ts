@@ -44,6 +44,7 @@ type ResolveTableCardBody = {
 };
 
 type StartGameBody = {
+  requesterPlayerId?: string;
   currentPlayerId?: string;
 };
 
@@ -1022,8 +1023,13 @@ app.post("/rooms/:roomId/rematch", async (c) => {
 app.post("/rooms/:roomId/start", async (c) => {
   const roomId = c.req.param("roomId");
   const body = await parseJsonBody<StartGameBody>(c.req.raw);
+  const requesterPlayerId = body?.requesterPlayerId;
   const requestedCurrentPlayerId = body?.currentPlayerId;
   const supabase = getSupabaseAdminClient();
+
+  if (!requesterPlayerId) {
+    return c.json({ error: "requesterPlayerId is required" }, 400);
+  }
 
   const { data: room, error: roomError } = await supabase
     .from("rooms")
@@ -1037,6 +1043,19 @@ app.post("/rooms/:roomId/start", async (c) => {
 
   if (room.status !== "waiting") {
     return c.json({ error: "Game already started or finished" }, 409);
+  }
+
+  const { data: requesterPlayer, error: requesterPlayerError } = await supabase
+    .from("players")
+    .select("id,is_host")
+    .eq("id", requesterPlayerId)
+    .eq("room_id", roomId)
+    .maybeSingle();
+  if (requesterPlayerError || !requesterPlayer) {
+    return c.json({ error: "Requester player not found in this room" }, 404);
+  }
+  if (!requesterPlayer.is_host) {
+    return c.json({ error: "Only host can start game" }, 403);
   }
 
   const { data: players, error: playersError } = await supabase

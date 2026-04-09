@@ -327,7 +327,7 @@ export default function Home() {
   };
 
   const onStartGame = async () => {
-    if (!selectedRoomId) {
+    if (!selectedRoomId || !currentPlayerId || !isCurrentPlayerHostInSelectedRoom) {
       return;
     }
     const roomId = selectedRoomId;
@@ -339,7 +339,9 @@ export default function Home() {
       const response = await fetch(`/api/rooms/${roomId}/start`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          requesterPlayerId: currentPlayerId,
+        }),
       });
 
       const payload = (await response.json()) as { error?: string };
@@ -539,6 +541,7 @@ export default function Home() {
                   onClick={selectedRoom.status === "waiting" ? onStartGame : onEnterGame}
                   disabled={
                     loading ||
+                    (selectedRoom.status === "waiting" && !isCurrentPlayerHostInSelectedRoom) ||
                     (selectedRoom.status === "playing" && !isCurrentPlayerInSelectedRoom) ||
                     (selectedRoom.status !== "waiting" && selectedRoom.status !== "playing")
                   }
