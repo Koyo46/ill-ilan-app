@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { PlayerZone } from "@/app/components/PlayerZone";
 
 type Room = {
   id: string;
@@ -18,6 +19,8 @@ type Player = {
   name: string;
   is_host: boolean;
   joined_at: string;
+  collected_cards: number[] | null;
+  bombs: number | null;
 };
 
 type GameState = {
@@ -80,6 +83,30 @@ export default function GameRoomPage() {
     }
     return players.some((player) => player.id === currentPlayerId);
   }, [currentPlayerId, players]);
+
+  const orderedPlayersForBoard = useMemo(() => {
+    if (!players.length) {
+      return [] as Player[];
+    }
+    if (!currentPlayerId) {
+      return players;
+    }
+    const selfIndex = players.findIndex((player) => player.id === currentPlayerId);
+    if (selfIndex < 0) {
+      return players;
+    }
+    return [...players.slice(selfIndex), ...players.slice(0, selfIndex)];
+  }, [currentPlayerId, players]);
+
+  const selfPlayer = useMemo(
+    () => orderedPlayersForBoard.find((player) => player.id === currentPlayerId) ?? null,
+    [currentPlayerId, orderedPlayersForBoard],
+  );
+
+  const otherPlayers = useMemo(
+    () => orderedPlayersForBoard.filter((player) => player.id !== currentPlayerId),
+    [currentPlayerId, orderedPlayersForBoard],
+  );
 
   const fetchRoom = useCallback(async () => {
     const response = await fetch(`/api/rooms/${roomId}`, { method: "GET" });
@@ -237,24 +264,51 @@ export default function GameRoomPage() {
             </div>
 
             <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
-              <h2 className="mb-4 text-xl font-semibold text-zinc-900 dark:text-zinc-100">プレイヤー</h2>
-              <ul className="space-y-2">
-                {players.map((player) => (
-                  <li
-                    key={player.id}
-                    className="rounded-md border border-zinc-200 px-3 py-2 text-sm text-zinc-800 dark:border-zinc-700 dark:text-zinc-200"
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      {player.is_host && <span className="material-symbols-outlined text-amber-500">crown</span>}
-                      <span>
-                        {player.name}
-                        {player.id === currentPlayerId ? "（あなた）" : ""}
-                        {player.id === gameState?.current_player_id ? "（手番）" : ""}
-                      </span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <h2 className="mb-4 text-xl font-semibold text-zinc-900 dark:text-zinc-100">プレイヤー配置</h2>
+              <div className="relative mx-auto h-[520px] max-w-[520px]">
+                {otherPlayers.map((player, index) => {
+                  const count = otherPlayers.length;
+                  const angleDeg = count === 1 ? -90 : -90 + (180 / (count - 1)) * index;
+                  const angleRad = (angleDeg * Math.PI) / 180;
+                  const radius = 190;
+                  const centerX = 260;
+                  const centerY = 230;
+                  const x = centerX + Math.cos(angleRad) * radius;
+                  const y = centerY + Math.sin(angleRad) * radius;
+
+                  return (
+                    <div
+                      key={player.id}
+                      className="absolute w-[220px] -translate-x-1/2 -translate-y-1/2"
+                      style={{ left: `${x}px`, top: `${y}px` }}
+                    >
+                      <PlayerZone
+                        player={{
+                          id: player.id,
+                          name: `${player.name}${player.id === gameState?.current_player_id ? "（手番）" : ""}`,
+                          collected_cards: player.collected_cards ?? [],
+                          bombs: player.bombs ?? 0,
+                        }}
+                        isCurrentTurn={player.id === gameState?.current_player_id}
+                      />
+                    </div>
+                  );
+                })}
+
+                {selfPlayer && (
+                  <div className="absolute bottom-0 left-1/2 w-[260px] -translate-x-1/2">
+                    <PlayerZone
+                      player={{
+                        id: selfPlayer.id,
+                        name: `${selfPlayer.name}（あなた）${selfPlayer.id === gameState?.current_player_id ? "（手番）" : ""}`,
+                        collected_cards: selfPlayer.collected_cards ?? [],
+                        bombs: selfPlayer.bombs ?? 0,
+                      }}
+                      isCurrentTurn={selfPlayer.id === gameState?.current_player_id}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="rounded-xl border border-zinc-200 bg-white p-6 md:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
