@@ -605,9 +605,6 @@ export default function GameRoomPage() {
                   <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
                     回答 {voteState.submittedCount} / {voteState.totalVoters}
                   </p>
-                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                    いる: {voteState.needCount} 人 / いらない: {voteState.passCount} 人
-                  </p>
 
                   {room?.status === "playing" && voteState.canVote && (
                     <div className="mt-3 flex items-center gap-2">
