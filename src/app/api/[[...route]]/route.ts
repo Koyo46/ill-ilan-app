@@ -435,9 +435,22 @@ app.post("/rooms/:roomId/start", async (c) => {
       : randomPlayer.id;
 
   const initialDeck = generateInitialDeck();
-  const firstCard = initialDeck.pop();
-  if (typeof firstCard !== "number") {
+  const distributedCards = new Map<string, number>();
+  for (let i = 0; i < players.length; i += 1) {
+    const card = initialDeck.pop();
+    if (typeof card !== "number") {
+      return c.json({ error: "Failed to distribute collected cards" }, 500);
+    }
+    distributedCards.set(players[i].id, card);
+  }
+
+  if (distributedCards.size !== players.length) {
     return c.json({ error: "Failed to initialize deck" }, 500);
+  }
+
+  const firstTableCard = initialDeck.pop();
+  if (typeof firstTableCard !== "number") {
+    return c.json({ error: "Failed to initialize table card" }, 500);
   }
 
   const { error: updateRoomError } = await supabase
@@ -449,6 +462,22 @@ app.post("/rooms/:roomId/start", async (c) => {
     return c.json({ error: updateRoomError.message }, 500);
   }
 
+  for (const player of players) {
+    const collectedCard = distributedCards.get(player.id);
+    if (typeof collectedCard !== "number") {
+      return c.json({ error: "Failed to assign collected card" }, 500);
+    }
+
+    const { error: updatePlayerError } = await supabase
+      .from("players")
+      .update({ collected_cards: [collectedCard] })
+      .eq("id", player.id);
+
+    if (updatePlayerError) {
+      return c.json({ error: updatePlayerError.message }, 500);
+    }
+  }
+
   const { data: gameState, error: gameStateError } = await supabase
     .from("game_states")
     .upsert(
@@ -458,7 +487,7 @@ app.post("/rooms/:roomId/start", async (c) => {
         current_player_id: currentPlayerId,
         draw_pile: initialDeck,
         discard_pile: [],
-        table_cards: [firstCard],
+        table_cards: [firstTableCard],
         event_log: [`ゲームが開始されました (${new Date().toISOString()})`],
       },
       { onConflict: "room_id" },
