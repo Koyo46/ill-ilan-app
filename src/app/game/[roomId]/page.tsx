@@ -258,10 +258,6 @@ export default function GameRoomPage() {
                     <dt>捨て札</dt>
                     <dd>{gameState.discard_pile.length} 枚</dd>
                   </div>
-                  <div className="flex justify-between gap-4">
-                    <dt>場のカード</dt>
-                    <dd>{gameState.table_cards.length} 枚</dd>
-                  </div>
                 </dl>
               ) : (
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">ゲーム状態を読み込み中です...</p>
@@ -294,48 +290,89 @@ export default function GameRoomPage() {
 
             <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
               <h2 className="mb-4 text-xl font-semibold text-zinc-900 dark:text-zinc-100">プレイヤー配置</h2>
-              <div className="relative mx-auto h-[520px] max-w-[520px]">
-                {otherPlayers.map((player, index) => {
-                  const count = otherPlayers.length;
-                  const angleDeg = count === 1 ? -90 : -90 + (180 / (count - 1)) * index;
-                  const angleRad = (angleDeg * Math.PI) / 180;
-                  const radius = 190;
-                  const centerX = 260;
-                  const centerY = 230;
-                  const x = centerX + Math.cos(angleRad) * radius;
-                  const y = centerY + Math.sin(angleRad) * radius;
-
-                  return (
-                    <div
-                      key={player.id}
-                      className="absolute w-[220px] -translate-x-1/2 -translate-y-1/2"
-                      style={{ left: `${x}px`, top: `${y}px` }}
-                    >
+              <div className="relative mx-auto h-[540px] max-w-[560px]">
+                {selfPlayer && otherPlayers.length === 2 ? (
+                  <>
+                    {/* 3人時は正三角形の頂点に配置 */}
+                    <div className="absolute left-[22%] top-[20%] w-[200px] -translate-x-1/2 -translate-y-1/2">
                       <PlayerZone
                         player={{
-                          id: player.id,
-                          name: `${player.name}${player.id === gameState?.current_player_id ? "（手番）" : ""}`,
-                          collected_cards: player.collected_cards ?? [],
-                          bombs: player.bombs ?? 0,
+                          id: otherPlayers[0].id,
+                          name: otherPlayers[0].name,
+                          collected_cards: otherPlayers[0].collected_cards ?? [],
+                          bombs: otherPlayers[0].bombs ?? 0,
                         }}
-                        isCurrentTurn={player.id === gameState?.current_player_id}
+                        isCurrentTurn={otherPlayers[0].id === gameState?.current_player_id}
                       />
                     </div>
-                  );
-                })}
+                    <div className="absolute left-[78%] top-[20%] w-[200px] -translate-x-1/2 -translate-y-1/2">
+                      <PlayerZone
+                        player={{
+                          id: otherPlayers[1].id,
+                          name: otherPlayers[1].name,
+                          collected_cards: otherPlayers[1].collected_cards ?? [],
+                          bombs: otherPlayers[1].bombs ?? 0,
+                        }}
+                        isCurrentTurn={otherPlayers[1].id === gameState?.current_player_id}
+                      />
+                    </div>
+                    <div className="absolute left-1/2 top-[82%] w-[230px] -translate-x-1/2 -translate-y-1/2">
+                      <PlayerZone
+                        player={{
+                          id: selfPlayer.id,
+                          name: `${selfPlayer.name}（あなた）`,
+                          collected_cards: selfPlayer.collected_cards ?? [],
+                          bombs: selfPlayer.bombs ?? 0,
+                        }}
+                        isCurrentTurn={selfPlayer.id === gameState?.current_player_id}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {otherPlayers.map((player, index) => {
+                      const count = otherPlayers.length;
+                      const angleDeg = count === 1 ? -90 : -90 + (180 / (count - 1)) * index;
+                      const angleRad = (angleDeg * Math.PI) / 180;
+                      const radius = 190;
+                      const centerX = 280;
+                      const centerY = 240;
+                      const x = centerX + Math.cos(angleRad) * radius;
+                      const y = centerY + Math.sin(angleRad) * radius;
 
-                {selfPlayer && (
-                  <div className="absolute bottom-0 left-1/2 w-[260px] -translate-x-1/2">
-                    <PlayerZone
-                      player={{
-                        id: selfPlayer.id,
-                        name: `${selfPlayer.name}（あなた）${selfPlayer.id === gameState?.current_player_id ? "（手番）" : ""}`,
-                        collected_cards: selfPlayer.collected_cards ?? [],
-                        bombs: selfPlayer.bombs ?? 0,
-                      }}
-                      isCurrentTurn={selfPlayer.id === gameState?.current_player_id}
-                    />
-                  </div>
+                      return (
+                        <div
+                          key={player.id}
+                          className="absolute w-[220px] -translate-x-1/2 -translate-y-1/2"
+                          style={{ left: `${x}px`, top: `${y}px` }}
+                        >
+                          <PlayerZone
+                            player={{
+                              id: player.id,
+                              name: player.name,
+                              collected_cards: player.collected_cards ?? [],
+                              bombs: player.bombs ?? 0,
+                            }}
+                            isCurrentTurn={player.id === gameState?.current_player_id}
+                          />
+                        </div>
+                      );
+                    })}
+
+                    {selfPlayer && (
+                      <div className="absolute bottom-0 left-1/2 w-[260px] -translate-x-1/2">
+                        <PlayerZone
+                          player={{
+                            id: selfPlayer.id,
+                            name: `${selfPlayer.name}（あなた）`,
+                            collected_cards: selfPlayer.collected_cards ?? [],
+                            bombs: selfPlayer.bombs ?? 0,
+                          }}
+                          isCurrentTurn={selfPlayer.id === gameState?.current_player_id}
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
