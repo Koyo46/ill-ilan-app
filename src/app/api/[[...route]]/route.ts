@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { handle } from "hono/vercel";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
+import { generateInitialDeck } from "@/lib/game-logic";
 
 export const runtime = "edge";
 
@@ -427,10 +428,17 @@ app.post("/rooms/:roomId/start", async (c) => {
     return c.json({ error: "At least one player is required" }, 400);
   }
 
+  const randomPlayer = players[Math.floor(Math.random() * players.length)];
   const currentPlayerId =
     requestedCurrentPlayerId && players.some((player) => player.id === requestedCurrentPlayerId)
       ? requestedCurrentPlayerId
-      : players[0].id;
+      : randomPlayer.id;
+
+  const initialDeck = generateInitialDeck();
+  const firstCard = initialDeck.pop();
+  if (typeof firstCard !== "number") {
+    return c.json({ error: "Failed to initialize deck" }, 500);
+  }
 
   const { error: updateRoomError } = await supabase
     .from("rooms")
@@ -448,10 +456,10 @@ app.post("/rooms/:roomId/start", async (c) => {
         room_id: roomId,
         turn: 1,
         current_player_id: currentPlayerId,
-        draw_pile: [],
+        draw_pile: initialDeck,
         discard_pile: [],
-        table_cards: [],
-        event_log: [],
+        table_cards: [firstCard],
+        event_log: [`ゲームが開始されました (${new Date().toISOString()})`],
       },
       { onConflict: "room_id" },
     )

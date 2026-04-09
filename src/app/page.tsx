@@ -330,12 +330,13 @@ export default function Home() {
     if (!selectedRoomId) {
       return;
     }
+    const roomId = selectedRoomId;
 
     setLoading(true);
     setErrorMessage(null);
 
     try {
-      const response = await fetch(`/api/rooms/${selectedRoomId}/start`, {
+      const response = await fetch(`/api/rooms/${roomId}/start`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
@@ -347,6 +348,7 @@ export default function Home() {
       }
 
       await fetchRooms();
+      router.push(`/game/${roomId}`);
     } catch (error) {
       setErrorMessage(createErrorMessage(error));
     } finally {
