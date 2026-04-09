@@ -97,8 +97,10 @@ app.get("/rooms/:roomId/players", async (c) => {
 
 // GET /api/rooms/:roomId/game-state
 // 指定部屋のゲーム状態を取得するAPI
+// viewerPlayerId が現在手番のプレイヤーなら table_cards はマスクして返す
 app.get("/rooms/:roomId/game-state", async (c) => {
   const roomId = c.req.param("roomId");
+  const viewerPlayerId = c.req.query("viewerPlayerId");
   const supabase = getSupabaseAdminClient();
 
   const { data, error } = await supabase
@@ -111,7 +113,26 @@ app.get("/rooms/:roomId/game-state", async (c) => {
     return c.json({ error: error.message }, 404);
   }
 
-  return c.json({ gameState: data });
+  let tableCardsHidden = true;
+  if (viewerPlayerId) {
+    const { data: viewerPlayer, error: viewerPlayerError } = await supabase
+      .from("players")
+      .select("id")
+      .eq("id", viewerPlayerId)
+      .eq("room_id", roomId)
+      .maybeSingle();
+
+    if (!viewerPlayerError && viewerPlayer) {
+      tableCardsHidden = data.current_player_id === viewerPlayerId;
+    }
+  }
+
+  const tableCards = Array.isArray(data.table_cards) ? data.table_cards : [];
+  const maskedGameState = tableCardsHidden
+    ? { ...data, table_cards: tableCards.map(() => null) }
+    : data;
+
+  return c.json({ gameState: maskedGameState, tableCardsHidden });
 });
 
 // POST /api/rooms

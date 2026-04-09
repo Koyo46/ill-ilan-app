@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { Card } from "@/app/components/Card";
 import { PlayerZone } from "@/app/components/PlayerZone";
 
 type Room = {
@@ -29,7 +30,7 @@ type GameState = {
   current_player_id: string | null;
   draw_pile: unknown[];
   discard_pile: unknown[];
-  table_cards: unknown[];
+  table_cards: Array<number | null>;
   event_log: string[];
 };
 
@@ -69,6 +70,7 @@ export default function GameRoomPage() {
   const [currentPlayerId, setCurrentPlayerId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [tableCardsHidden, setTableCardsHidden] = useState(true);
 
   const currentTurnPlayerName = useMemo(() => {
     if (!gameState?.current_player_id) {
@@ -126,30 +128,33 @@ export default function GameRoomPage() {
     setPlayers(data.players ?? []);
   }, [roomId]);
 
-  const fetchGameState = useCallback(async () => {
-    const response = await fetch(`/api/rooms/${roomId}/game-state`, { method: "GET" });
+  const fetchGameState = useCallback(async (viewerPlayerId?: string | null) => {
+    const query = viewerPlayerId ? `?viewerPlayerId=${encodeURIComponent(viewerPlayerId)}` : "";
+    const response = await fetch(`/api/rooms/${roomId}/game-state${query}`, { method: "GET" });
     if (!response.ok) {
       throw new Error("ゲーム状態の取得に失敗しました");
     }
-    const data = (await response.json()) as { gameState: GameState };
+    const data = (await response.json()) as { gameState: GameState; tableCardsHidden?: boolean };
     setGameState(data.gameState);
+    setTableCardsHidden(data.tableCardsHidden === true);
   }, [roomId]);
 
-  const reloadGameData = useCallback(async () => {
+  const reloadGameData = useCallback(async (viewerPlayerId: string | null = currentPlayerId) => {
     setLoading(true);
     setErrorMessage(null);
     try {
-      await Promise.all([fetchRoom(), fetchPlayers(), fetchGameState()]);
+      await Promise.all([fetchRoom(), fetchPlayers(), fetchGameState(viewerPlayerId)]);
     } catch (error) {
       setErrorMessage(createErrorMessage(error));
     } finally {
       setLoading(false);
     }
-  }, [fetchGameState, fetchPlayers, fetchRoom]);
+  }, [currentPlayerId, fetchGameState, fetchPlayers, fetchRoom]);
 
   useEffect(() => {
-    setCurrentPlayerId(getStoredPlayerIdByRoom(roomId));
-    reloadGameData().catch((error) => {
+    const storedPlayerId = getStoredPlayerIdByRoom(roomId);
+    setCurrentPlayerId(storedPlayerId);
+    reloadGameData(storedPlayerId).catch((error) => {
       setErrorMessage(createErrorMessage(error));
     });
   }, [reloadGameData, roomId]);
@@ -185,7 +190,7 @@ export default function GameRoomPage() {
         "postgres_changes",
         { event: "*", schema: "public", table: "game_states", filter: `room_id=eq.${roomId}` },
         () => {
-          fetchGameState().catch((error) => setErrorMessage(createErrorMessage(error)));
+          fetchGameState(currentPlayerId).catch((error) => setErrorMessage(createErrorMessage(error)));
         },
       )
       .subscribe();
@@ -195,7 +200,7 @@ export default function GameRoomPage() {
       void supabase.removeChannel(playersChannel);
       void supabase.removeChannel(gameStateChannel);
     };
-  }, [fetchGameState, fetchPlayers, fetchRoom, roomId]);
+  }, [currentPlayerId, fetchGameState, fetchPlayers, fetchRoom, roomId]);
 
   return (
     <div className="min-h-screen bg-zinc-50 py-12 dark:bg-zinc-950">
@@ -260,6 +265,30 @@ export default function GameRoomPage() {
                 </dl>
               ) : (
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">ゲーム状態を読み込み中です...</p>
+              )}
+              {gameState && (
+                <div className="mt-4">
+                  <h3 className="mb-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">場のカード</h3>
+                  <div className="flex flex-wrap gap-2">
+                    {gameState.table_cards.map((cardValue, index) =>
+                      typeof cardValue === "number" ? (
+                        <Card key={`table-card-${index}`} value={cardValue} isBomb={false} />
+                      ) : (
+                        <div
+                          key={`table-card-hidden-${index}`}
+                          className="flex h-16 w-12 items-center justify-center rounded-lg border-2 border-slate-300 bg-slate-200 text-xl font-bold text-slate-600"
+                        >
+                          ?
+                        </div>
+                      ),
+                    )}
+                  </div>
+                  {tableCardsHidden && (
+                    <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                      あなたの手番中は場のカードを非表示にしています。
+                    </p>
+                  )}
+                </div>
               )}
             </div>
 
