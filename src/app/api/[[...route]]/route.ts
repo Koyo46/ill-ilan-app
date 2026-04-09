@@ -47,12 +47,46 @@ type StartGameBody = {
   currentPlayerId?: string;
 };
 
+type RematchBody = {
+  playerId?: string;
+};
+
 const parseJsonBody = async <T>(request: Request): Promise<T | null> => {
   try {
     return (await request.json()) as T;
   } catch {
     return null;
   }
+};
+
+const countBombsFromCollectedCards = (cards: number[]) => {
+  const counts = new Map<number, number>();
+  for (const card of cards) {
+    counts.set(card, (counts.get(card) ?? 0) + 1);
+  }
+
+  let bombs = 0;
+  for (const [value, count] of counts.entries()) {
+    if (value >= 10) {
+      bombs += count;
+    } else {
+      bombs += Math.floor(count / 2);
+    }
+  }
+  return bombs;
+};
+
+const sumCards = (cards: number[]) => cards.reduce((sum, card) => sum + card, 0);
+
+const shuffleArray = <T>(input: T[]) => {
+  const cloned = [...input];
+  for (let i = cloned.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const temp = cloned[i];
+    cloned[i] = cloned[j];
+    cloned[j] = temp;
+  }
+  return cloned;
 };
 
 // GET /api/rooms
@@ -113,6 +147,15 @@ app.get("/rooms/:roomId/game-state", async (c) => {
   const viewerPlayerId = c.req.query("viewerPlayerId");
   const supabase = getSupabaseAdminClient();
 
+  const { data: room, error: roomError } = await supabase
+    .from("rooms")
+    .select("status")
+    .eq("id", roomId)
+    .single();
+  if (roomError || !room) {
+    return c.json({ error: "Room not found" }, 404);
+  }
+
   const { data, error } = await supabase
     .from("game_states")
     .select("*")
@@ -125,7 +168,7 @@ app.get("/rooms/:roomId/game-state", async (c) => {
 
   const { data: players, error: playersError } = await supabase
     .from("players")
-    .select("id")
+    .select("id,name,collected_cards,joined_at")
     .eq("room_id", roomId)
     .order("joined_at", { ascending: true });
   if (playersError) {
@@ -178,15 +221,64 @@ app.get("/rooms/:roomId/game-state", async (c) => {
   }
 
   const tableCards = Array.isArray(data.table_cards) ? data.table_cards : [];
-  const maskedGameState = tableCardsHidden
-    ? { ...data, table_cards: tableCards.map(() => null) }
-    : data;
+  const drawPile = Array.isArray(data.draw_pile) ? data.draw_pile : [];
+  const drawPileCompositionMap = new Map<number, number>();
+  for (const rawCard of drawPile) {
+    if (typeof rawCard !== "number") {
+      continue;
+    }
+    drawPileCompositionMap.set(rawCard, (drawPileCompositionMap.get(rawCard) ?? 0) + 1);
+  }
+  const drawPileComposition = Array.from(drawPileCompositionMap.entries())
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => a.value - b.value);
+  const maskedGameState = {
+    ...data,
+    // 山札の実体はクライアントへ返さない
+    draw_pile: [],
+    draw_pile_count: drawPile.length,
+    draw_pile_composition: drawPileComposition,
+    table_cards: tableCardsHidden ? tableCards.map(() => null) : tableCards,
+  };
 
   const isViewerCurrentPlayer = viewerPlayerId != null && viewerPlayerId === currentTurnPlayerId;
   const myVote =
     viewerPlayerId && targetVoterIds.includes(viewerPlayerId)
       ? (voteByPlayer.get(viewerPlayerId) ?? null)
       : null;
+  const votesByPlayer = Object.fromEntries(
+    targetVoterIds.map((playerId) => [playerId, voteByPlayer.has(playerId) ? voteByPlayer.get(playerId) : null]),
+  );
+  const winnerByUniqueCards = (players ?? []).find((player) => {
+    const collectedCards = Array.isArray(player.collected_cards) ? player.collected_cards : [];
+    return new Set(collectedCards).size >= 5;
+  });
+  const winnerByHighestSumWhenFinished =
+    room.status === "finished" && (players ?? []).length > 0
+      ? (players ?? []).reduce((best, player) => {
+          const cards = Array.isArray(player.collected_cards) ? player.collected_cards : [];
+          const score = sumCards(cards);
+          if (!best || score > best.score) {
+            return { player, score };
+          }
+          return best;
+        }, null as { player: (typeof players)[number]; score: number } | null)
+      : null;
+  const winnerPlayer = winnerByUniqueCards ?? winnerByHighestSumWhenFinished?.player ?? null;
+  const eventLog = Array.isArray(data.event_log) ? data.event_log : [];
+  const latestWinnerLog = [...eventLog]
+    .reverse()
+    .find((log) => typeof log === "string" && log.includes("勝利"));
+  const winnerReason: "unique" | "score" | null =
+    typeof latestWinnerLog === "string" && latestWinnerLog.includes("種類達成")
+      ? "unique"
+      : typeof latestWinnerLog === "string" && latestWinnerLog.includes("合計")
+        ? "score"
+        : winnerByUniqueCards
+          ? "unique"
+          : winnerByHighestSumWhenFinished
+            ? "score"
+            : null;
 
   return c.json({
     gameState: maskedGameState,
@@ -206,7 +298,19 @@ app.get("/rooms/:roomId/game-state", async (c) => {
       canResolve:
         Boolean(isViewerCurrentPlayer && allVotesSubmitted && Array.isArray(data.table_cards) && data.table_cards.length > 0),
       myVote,
+      votesByPlayer,
     },
+    winner: winnerPlayer
+      ? {
+          playerId: winnerPlayer.id,
+          playerName: winnerPlayer.name,
+          uniqueCardCount: new Set(
+            Array.isArray(winnerPlayer.collected_cards) ? winnerPlayer.collected_cards : [],
+          ).size,
+          score: sumCards(Array.isArray(winnerPlayer.collected_cards) ? winnerPlayer.collected_cards : []),
+          reason: winnerReason,
+        }
+      : null,
   });
 });
 
@@ -501,6 +605,17 @@ app.post("/rooms/:roomId/vote", async (c) => {
   }
 
   const supabase = getSupabaseAdminClient();
+  const { data: room, error: roomError } = await supabase
+    .from("rooms")
+    .select("status")
+    .eq("id", roomId)
+    .single();
+  if (roomError || !room) {
+    return c.json({ error: "Room not found" }, 404);
+  }
+  if (room.status !== "playing") {
+    return c.json({ error: "Voting is only available while playing" }, 409);
+  }
 
   const { data: gameState, error: gameStateError } = await supabase
     .from("game_states")
@@ -525,19 +640,30 @@ app.post("/rooms/:roomId/vote", async (c) => {
     return c.json({ error: "Player not found in this room" }, 404);
   }
 
-  const { error: upsertVoteError } = await supabase
+  const { data: existingVote, error: existingVoteError } = await supabase
     .from("card_votes")
-    .upsert(
-      {
-        room_id: roomId,
-        turn: Number(gameState.turn),
-        voter_player_id: playerId,
-        wants_card: wantsCard,
-      },
-      { onConflict: "room_id,turn,voter_player_id" },
-    );
-  if (upsertVoteError) {
-    return c.json({ error: upsertVoteError.message }, 500);
+    .select("id")
+    .eq("room_id", roomId)
+    .eq("turn", Number(gameState.turn))
+    .eq("voter_player_id", playerId)
+    .maybeSingle();
+  if (existingVoteError) {
+    return c.json({ error: existingVoteError.message }, 500);
+  }
+  if (existingVote) {
+    return c.json({ error: "Vote already confirmed for this turn" }, 409);
+  }
+
+  const { error: insertVoteError } = await supabase
+    .from("card_votes")
+    .insert({
+      room_id: roomId,
+      turn: Number(gameState.turn),
+      voter_player_id: playerId,
+      wants_card: wantsCard,
+    });
+  if (insertVoteError) {
+    return c.json({ error: insertVoteError.message }, 500);
   }
 
   return c.json({ success: true });
@@ -556,6 +682,17 @@ app.post("/rooms/:roomId/resolve-table-card", async (c) => {
   }
 
   const supabase = getSupabaseAdminClient();
+  const { data: room, error: roomError } = await supabase
+    .from("rooms")
+    .select("status")
+    .eq("id", roomId)
+    .single();
+  if (roomError || !room) {
+    return c.json({ error: "Room not found" }, 404);
+  }
+  if (room.status !== "playing") {
+    return c.json({ error: "Resolve is only available while playing" }, 409);
+  }
 
   const { data: gameState, error: gameStateError } = await supabase
     .from("game_states")
@@ -626,17 +763,19 @@ app.post("/rooms/:roomId/resolve-table-card", async (c) => {
   }
 
   const currentCollectedCards = Array.isArray(receiver.collected_cards) ? receiver.collected_cards : [];
+  const nextCollectedCards = [...currentCollectedCards, tableCard];
+  const nextBombCount = countBombsFromCollectedCards(nextCollectedCards);
   const { error: updateReceiverError } = await supabase
     .from("players")
-    .update({ collected_cards: [...currentCollectedCards, tableCard] })
+    .update({ collected_cards: nextCollectedCards, bombs: nextBombCount })
     .eq("id", receiverPlayerId);
   if (updateReceiverError) {
     return c.json({ error: updateReceiverError.message }, 500);
   }
 
-  const currentPlayerIndex = players.findIndex((player) => player.id === playerId);
-  const nextPlayer =
-    currentPlayerIndex >= 0 ? players[(currentPlayerIndex + 1) % players.length] : players[0];
+  const isEliminatedByBomb = nextBombCount >= 2;
+  const uniqueCardCount = new Set(nextCollectedCards).size;
+  const isWinnerByUniqueCards = uniqueCardCount >= 5;
 
   const drawPile = Array.isArray(gameState.draw_pile) ? [...gameState.draw_pile] : [];
   const nextTableCard = drawPile.pop();
@@ -646,24 +785,100 @@ app.post("/rooms/:roomId/resolve-table-card", async (c) => {
   const voteModeLog = forcedAllNeed
     ? "全員いらないのため、全員いる扱いで候補化"
     : "いると答えたプレイヤーから選択";
+  const baseTurnLog = `ターン${currentTurn}: ${receiverLabel} が場のカード ${tableCard} を受け取りました (${voteModeLog})`;
 
-  const { data: updatedGameState, error: updateGameStateError } = await supabase
-    .from("game_states")
-    .update({
-      turn: currentTurn + 1,
-      current_player_id: nextPlayer?.id ?? playerId,
-      draw_pile: drawPile,
-      table_cards: nextTableCards,
-      event_log: [
-        ...currentEventLog,
-        `ターン${currentTurn}: ${receiverLabel} が場のカード ${tableCard} を受け取りました (${voteModeLog})`,
-      ],
-    })
-    .eq("room_id", roomId)
-    .select("*")
-    .single();
-  if (updateGameStateError) {
-    return c.json({ error: updateGameStateError.message }, 500);
+  let updatedGameState: Record<string, unknown> | null = null;
+
+  if (isEliminatedByBomb) {
+    const { error: deleteEliminatedPlayerError } = await supabase
+      .from("players")
+      .delete()
+      .eq("id", receiver.id);
+    if (deleteEliminatedPlayerError) {
+      return c.json({ error: deleteEliminatedPlayerError.message }, 500);
+    }
+
+    const { data: remainingPlayers, error: remainingPlayersError } = await supabase
+      .from("players")
+      .select("*")
+      .eq("room_id", roomId)
+      .order("joined_at", { ascending: true });
+    if (remainingPlayersError) {
+      return c.json({ error: remainingPlayersError.message }, 500);
+    }
+
+    const winnerByScore = (remainingPlayers ?? []).reduce((best, player) => {
+      const cards = Array.isArray(player.collected_cards) ? player.collected_cards : [];
+      const score = sumCards(cards);
+      if (!best || score > best.score) {
+        return { player, score };
+      }
+      return best;
+    }, null as { player: (typeof players)[number]; score: number } | null);
+
+    const eliminationLog = `💥 ${receiver.name} が爆弾2個で脱落しました`;
+    const winnerLog = winnerByScore
+      ? `🏆 ${winnerByScore.player.name} が合計 ${winnerByScore.score} 点で勝利しました！`
+      : "🏆 勝者なしでゲーム終了";
+
+    const { data: finishedGameState, error: finishGameStateError } = await supabase
+      .from("game_states")
+      .update({
+        turn: currentTurn,
+        current_player_id: winnerByScore?.player.id ?? null,
+        draw_pile: drawPile,
+        table_cards: [],
+        event_log: [...currentEventLog, baseTurnLog, eliminationLog, winnerLog],
+      })
+      .eq("room_id", roomId)
+      .select("*")
+      .single();
+    if (finishGameStateError) {
+      return c.json({ error: finishGameStateError.message }, 500);
+    }
+    updatedGameState = finishedGameState;
+
+    const { error: finishRoomError } = await supabase
+      .from("rooms")
+      .update({ status: "finished" })
+      .eq("id", roomId);
+    if (finishRoomError) {
+      return c.json({ error: finishRoomError.message }, 500);
+    }
+  } else {
+    const currentPlayerIndex = players.findIndex((player) => player.id === playerId);
+    const nextPlayer =
+      currentPlayerIndex >= 0 ? players[(currentPlayerIndex + 1) % players.length] : players[0];
+    const winnerLog = isWinnerByUniqueCards
+      ? `🏆 ${receiver.name} が ${uniqueCardCount} 種類達成で勝利しました！`
+      : null;
+
+    const { data: progressedGameState, error: updateGameStateError } = await supabase
+      .from("game_states")
+      .update({
+        turn: isWinnerByUniqueCards ? currentTurn : currentTurn + 1,
+        current_player_id: isWinnerByUniqueCards ? playerId : nextPlayer?.id ?? playerId,
+        draw_pile: drawPile,
+        table_cards: isWinnerByUniqueCards ? [] : nextTableCards,
+        event_log: [...currentEventLog, baseTurnLog, ...(winnerLog ? [winnerLog] : [])],
+      })
+      .eq("room_id", roomId)
+      .select("*")
+      .single();
+    if (updateGameStateError) {
+      return c.json({ error: updateGameStateError.message }, 500);
+    }
+    updatedGameState = progressedGameState;
+
+    if (isWinnerByUniqueCards) {
+      const { error: finishRoomError } = await supabase
+        .from("rooms")
+        .update({ status: "finished" })
+        .eq("id", roomId);
+      if (finishRoomError) {
+        return c.json({ error: finishRoomError.message }, 500);
+      }
+    }
   }
 
   const { error: deleteVotesError } = await supabase
@@ -676,6 +891,130 @@ app.post("/rooms/:roomId/resolve-table-card", async (c) => {
   }
 
   return c.json({ success: true, gameState: updatedGameState });
+});
+
+// POST /api/rooms/:roomId/rematch
+// 再戦API（山札再生成・再配布・手番ランダム・場札1枚で再開）
+app.post("/rooms/:roomId/rematch", async (c) => {
+  const roomId = c.req.param("roomId");
+  const body = await parseJsonBody<RematchBody>(c.req.raw);
+  const playerId = body?.playerId;
+
+  if (!playerId) {
+    return c.json({ error: "playerId is required" }, 400);
+  }
+
+  const supabase = getSupabaseAdminClient();
+
+  const { data: room, error: roomError } = await supabase
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .single();
+  if (roomError || !room) {
+    return c.json({ error: "Room not found" }, 404);
+  }
+  if (room.status !== "finished") {
+    return c.json({ error: "Rematch is only available after game finished" }, 409);
+  }
+
+  const { data: requestingPlayer, error: requestingPlayerError } = await supabase
+    .from("players")
+    .select("id")
+    .eq("id", playerId)
+    .eq("room_id", roomId)
+    .maybeSingle();
+  if (requestingPlayerError || !requestingPlayer) {
+    return c.json({ error: "Player not found in this room" }, 404);
+  }
+
+  const { data: players, error: playersError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("room_id", roomId)
+    .order("joined_at", { ascending: true });
+  if (playersError || !players) {
+    return c.json({ error: playersError?.message ?? "Players not found" }, 500);
+  }
+  if (players.length === 0) {
+    return c.json({ error: "At least one player is required for rematch" }, 400);
+  }
+
+  const randomizedPlayers = shuffleArray(players);
+  const initialDeck = generateInitialDeck();
+  const distributedCards = new Map<string, number>();
+  for (let i = 0; i < randomizedPlayers.length; i += 1) {
+    const card = initialDeck.pop();
+    if (typeof card !== "number") {
+      return c.json({ error: "Failed to distribute cards for rematch" }, 500);
+    }
+    distributedCards.set(randomizedPlayers[i].id, card);
+  }
+  const firstTableCard = initialDeck.pop();
+  if (typeof firstTableCard !== "number") {
+    return c.json({ error: "Failed to initialize table card for rematch" }, 500);
+  }
+
+  for (let i = 0; i < randomizedPlayers.length; i += 1) {
+    const player = randomizedPlayers[i];
+    const collectedCard = distributedCards.get(player.id);
+    if (typeof collectedCard !== "number") {
+      return c.json({ error: "Failed to assign rematch card" }, 500);
+    }
+
+    // joined_at を更新してプレイ順をランダム化
+    const randomizedJoinedAt = new Date(Date.now() + i * 1000).toISOString();
+    const collectedCards = [collectedCard];
+    const bombs = countBombsFromCollectedCards(collectedCards);
+
+    const { error: updatePlayerError } = await supabase
+      .from("players")
+      .update({
+        joined_at: randomizedJoinedAt,
+        collected_cards: collectedCards,
+        bombs,
+      })
+      .eq("id", player.id);
+    if (updatePlayerError) {
+      return c.json({ error: updatePlayerError.message }, 500);
+    }
+  }
+
+  const currentPlayer = randomizedPlayers[Math.floor(Math.random() * randomizedPlayers.length)];
+
+  const { error: clearVotesError } = await supabase.from("card_votes").delete().eq("room_id", roomId);
+  if (clearVotesError) {
+    return c.json({ error: clearVotesError.message }, 500);
+  }
+
+  const { data: gameState, error: gameStateError } = await supabase
+    .from("game_states")
+    .upsert(
+      {
+        room_id: roomId,
+        turn: 1,
+        current_player_id: currentPlayer.id,
+        draw_pile: initialDeck,
+        table_cards: [firstTableCard],
+        event_log: [`再戦が開始されました (${new Date().toISOString()})`],
+      },
+      { onConflict: "room_id" },
+    )
+    .select("*")
+    .single();
+  if (gameStateError) {
+    return c.json({ error: gameStateError.message }, 500);
+  }
+
+  const { error: updateRoomError } = await supabase
+    .from("rooms")
+    .update({ status: "playing" })
+    .eq("id", roomId);
+  if (updateRoomError) {
+    return c.json({ error: updateRoomError.message }, 500);
+  }
+
+  return c.json({ success: true, gameState });
 });
 
 // POST /api/rooms/:roomId/start
@@ -753,10 +1092,12 @@ app.post("/rooms/:roomId/start", async (c) => {
     if (typeof collectedCard !== "number") {
       return c.json({ error: "Failed to assign collected card" }, 500);
     }
+    const initialCollectedCards = [collectedCard];
+    const initialBombs = countBombsFromCollectedCards(initialCollectedCards);
 
     const { error: updatePlayerError } = await supabase
       .from("players")
-      .update({ collected_cards: [collectedCard] })
+      .update({ collected_cards: initialCollectedCards, bombs: initialBombs })
       .eq("id", player.id);
 
     if (updatePlayerError) {

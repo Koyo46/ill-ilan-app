@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactElement } from "react";
 import { Card } from './Card';
 
 type Player = {
@@ -8,7 +8,17 @@ type Player = {
   bombs: number;
 };
 
-export const PlayerZone = ({ player, isCurrentTurn }: { player: Player; isCurrentTurn: boolean }) => {
+export const PlayerZone = ({
+  player,
+  isCurrentTurn,
+  voteLabel,
+  isVoteConfirmed = false,
+}: {
+  player: Player;
+  isCurrentTurn: boolean;
+  voteLabel?: string | null;
+  isVoteConfirmed?: boolean;
+}) => {
   const groupedCards = player.collected_cards.reduce<Array<{ value: number; count: number }>>((acc, value) => {
     const existing = acc.find((entry) => entry.value === value);
     if (existing) {
@@ -25,7 +35,20 @@ export const PlayerZone = ({ player, isCurrentTurn }: { player: Player; isCurren
         <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center">
           {player.name[0]}
         </div>
-        <span className="font-semibold">{player.name}</span>
+        <div className="flex items-center gap-2">
+          <span className="font-semibold">{player.name}</span>
+          {voteLabel && (
+            <span
+              className={`rounded-md border-2 px-1.5 py-0.5 text-[10px] font-semibold leading-none ${
+                isVoteConfirmed
+                  ? "border-blue-500 text-blue-700"
+                  : "border-zinc-300 text-zinc-600"
+              }`}
+            >
+              {voteLabel}
+            </span>
+          )}
+        </div>
         {/* 爆弾数をアイコンで表示 */}
         <div className="flex gap-1 ml-auto">
           {[...Array(player.bombs)].map((_, i) => (
@@ -37,9 +60,15 @@ export const PlayerZone = ({ player, isCurrentTurn }: { player: Player; isCurren
       {/* 獲得カードリスト */}
       <div className="flex flex-wrap gap-2">
         {groupedCards.flatMap(({ value, count }) => {
+          if (value >= 10) {
+            return Array.from({ length: count }).map((_, index) => (
+              <Card key={`${player.id}-${value}-fixed-bomb-${index}`} value={value} isBomb bombNumber={value} />
+            ));
+          }
+
           const pairCount = Math.floor(count / 2);
           const remainder = count % 2;
-          const items: ReactNode[] = [];
+          const items: ReactElement[] = [];
 
           for (let i = 0; i < pairCount; i += 1) {
             items.push(
