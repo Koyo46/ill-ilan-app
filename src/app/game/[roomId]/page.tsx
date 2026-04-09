@@ -29,9 +29,22 @@ type GameState = {
   turn: number;
   current_player_id: string | null;
   draw_pile: unknown[];
-  discard_pile: unknown[];
   table_cards: Array<number | null>;
   event_log: string[];
+};
+
+type VoteState = {
+  turn: number;
+  totalVoters: number;
+  submittedCount: number;
+  allVotesSubmitted: boolean;
+  forcedAllNeed: boolean;
+  eligibleReceiverPlayerIds: string[];
+  needCount: number;
+  passCount: number;
+  canVote: boolean;
+  canResolve: boolean;
+  myVote: boolean | null;
 };
 
 const PLAYER_ID_STORAGE_KEY = "ill-ilan-player-ids-by-room";
@@ -71,6 +84,7 @@ export default function GameRoomPage() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [tableCardsHidden, setTableCardsHidden] = useState(true);
+  const [voteState, setVoteState] = useState<VoteState | null>(null);
 
   const currentTurnPlayerName = useMemo(() => {
     if (!gameState?.current_player_id) {
@@ -110,6 +124,13 @@ export default function GameRoomPage() {
     [currentPlayerId, orderedPlayersForBoard],
   );
 
+  const eligibleReceivers = useMemo(() => {
+    if (!voteState) {
+      return [] as Player[];
+    }
+    return players.filter((player) => voteState.eligibleReceiverPlayerIds.includes(player.id));
+  }, [players, voteState]);
+
   const fetchRoom = useCallback(async () => {
     const response = await fetch(`/api/rooms/${roomId}`, { method: "GET" });
     if (!response.ok) {
@@ -134,9 +155,14 @@ export default function GameRoomPage() {
     if (!response.ok) {
       throw new Error("ゲーム状態の取得に失敗しました");
     }
-    const data = (await response.json()) as { gameState: GameState; tableCardsHidden?: boolean };
+    const data = (await response.json()) as {
+      gameState: GameState;
+      tableCardsHidden?: boolean;
+      voteState?: VoteState;
+    };
     setGameState(data.gameState);
     setTableCardsHidden(data.tableCardsHidden === true);
+    setVoteState(data.voteState ?? null);
   }, [roomId]);
 
   const reloadGameData = useCallback(async (viewerPlayerId: string | null = currentPlayerId) => {
@@ -150,6 +176,62 @@ export default function GameRoomPage() {
       setLoading(false);
     }
   }, [currentPlayerId, fetchGameState, fetchPlayers, fetchRoom]);
+
+  const onVoteTableCard = async (wantsCard: boolean) => {
+    if (!currentPlayerId || !voteState?.canVote) {
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(`/api/rooms/${roomId}/vote`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          playerId: currentPlayerId,
+          wantsCard,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error ?? "意思表示に失敗しました");
+      }
+      await reloadGameData(currentPlayerId);
+    } catch (error) {
+      setErrorMessage(createErrorMessage(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onResolveTableCard = async (receiverPlayerId: string) => {
+    if (!currentPlayerId || !voteState?.canResolve) {
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(`/api/rooms/${roomId}/resolve-table-card`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          playerId: currentPlayerId,
+          receiverPlayerId,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error ?? "カード配布確定に失敗しました");
+      }
+      await reloadGameData(currentPlayerId);
+    } catch (error) {
+      setErrorMessage(createErrorMessage(error));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     const storedPlayerId = getStoredPlayerIdByRoom(roomId);
@@ -254,10 +336,6 @@ export default function GameRoomPage() {
                     <dt>山札</dt>
                     <dd>{gameState.draw_pile.length} 枚</dd>
                   </div>
-                  <div className="flex justify-between gap-4">
-                    <dt>捨て札</dt>
-                    <dd>{gameState.discard_pile.length} 枚</dd>
-                  </div>
                 </dl>
               ) : (
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">ゲーム状態を読み込み中です...</p>
@@ -283,6 +361,80 @@ export default function GameRoomPage() {
                     <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
                       あなたの手番中は場のカードを非表示にしています。
                     </p>
+                  )}
+                </div>
+              )}
+
+              {voteState && (
+                <div className="mt-5 rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-700">
+                  <p className="font-medium text-zinc-900 dark:text-zinc-100">意思表示状況</p>
+                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                    回答 {voteState.submittedCount} / {voteState.totalVoters}
+                  </p>
+                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                    いる: {voteState.needCount} 人 / いらない: {voteState.passCount} 人
+                  </p>
+
+                  {voteState.canVote && (
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        className={`rounded-md px-3 py-1 font-medium text-white ${
+                          voteState.myVote === true ? "bg-emerald-600" : "bg-emerald-500"
+                        }`}
+                        onClick={() => {
+                          onVoteTableCard(true).catch(() => undefined);
+                        }}
+                        disabled={loading}
+                      >
+                        いる
+                      </button>
+                      <button
+                        type="button"
+                        className={`rounded-md px-3 py-1 font-medium text-white ${
+                          voteState.myVote === false ? "bg-zinc-700" : "bg-zinc-600"
+                        }`}
+                        onClick={() => {
+                          onVoteTableCard(false).catch(() => undefined);
+                        }}
+                        disabled={loading}
+                      >
+                        いらない
+                      </button>
+                    </div>
+                  )}
+
+                  {!voteState.canVote && !voteState.canResolve && (
+                    <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
+                      {voteState.allVotesSubmitted
+                        ? "手番プレイヤーの配布決定を待っています。"
+                        : "他プレイヤーの回答を待っています。"}
+                    </p>
+                  )}
+
+                  {voteState.canResolve && (
+                    <div className="mt-3">
+                      <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-400">
+                        手番プレイヤー: カードの受取先を選択してください
+                        {voteState.forcedAllNeed ? "（全員いらないだったため全員候補）" : ""}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {eligibleReceivers.map((receiver) => (
+                          <button
+                            key={receiver.id}
+                            type="button"
+                            className="rounded-md bg-blue-600 px-3 py-1 text-white"
+                            onClick={() => {
+                              onResolveTableCard(receiver.id).catch(() => undefined);
+                            }}
+                            disabled={loading}
+                          >
+                            {receiver.name}
+                            {receiver.id === currentPlayerId ? "（自分）" : ""}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
               )}

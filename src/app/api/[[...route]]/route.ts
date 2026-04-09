@@ -33,6 +33,16 @@ type DeleteRoomBody = {
   playerId?: string;
 };
 
+type VoteCardBody = {
+  playerId?: string;
+  wantsCard?: boolean;
+};
+
+type ResolveTableCardBody = {
+  playerId?: string;
+  receiverPlayerId?: string;
+};
+
 type StartGameBody = {
   currentPlayerId?: string;
 };
@@ -113,6 +123,46 @@ app.get("/rooms/:roomId/game-state", async (c) => {
     return c.json({ error: error.message }, 404);
   }
 
+  const { data: players, error: playersError } = await supabase
+    .from("players")
+    .select("id")
+    .eq("room_id", roomId)
+    .order("joined_at", { ascending: true });
+  if (playersError) {
+    return c.json({ error: playersError.message }, 500);
+  }
+
+  const currentTurnPlayerId = data.current_player_id as string | null;
+  const currentTurn = Number(data.turn ?? 1);
+  const targetVoterIds = (players ?? [])
+    .map((player) => player.id as string)
+    .filter((playerId) => playerId !== currentTurnPlayerId);
+
+  const { data: voteRows, error: votesError } = await supabase
+    .from("card_votes")
+    .select("voter_player_id, wants_card")
+    .eq("room_id", roomId)
+    .eq("turn", currentTurn);
+  if (votesError) {
+    return c.json({ error: votesError.message }, 500);
+  }
+
+  const voteByPlayer = new Map<string, boolean>();
+  for (const vote of voteRows ?? []) {
+    voteByPlayer.set(vote.voter_player_id as string, Boolean(vote.wants_card));
+  }
+
+  const submittedCount = targetVoterIds.filter((playerId) => voteByPlayer.has(playerId)).length;
+  const allVotesSubmitted = submittedCount === targetVoterIds.length;
+  const needPlayerIds = targetVoterIds.filter((playerId) => voteByPlayer.get(playerId) === true);
+  const forcedAllNeed = allVotesSubmitted && needPlayerIds.length === 0 && targetVoterIds.length > 0;
+  const eligibleReceiverPlayerIds = !allVotesSubmitted
+    ? []
+    : [
+        ...(currentTurnPlayerId ? [currentTurnPlayerId] : []),
+        ...(forcedAllNeed ? targetVoterIds : needPlayerIds),
+      ];
+
   let tableCardsHidden = true;
   if (viewerPlayerId) {
     const { data: viewerPlayer, error: viewerPlayerError } = await supabase
@@ -132,7 +182,32 @@ app.get("/rooms/:roomId/game-state", async (c) => {
     ? { ...data, table_cards: tableCards.map(() => null) }
     : data;
 
-  return c.json({ gameState: maskedGameState, tableCardsHidden });
+  const isViewerCurrentPlayer = viewerPlayerId != null && viewerPlayerId === currentTurnPlayerId;
+  const myVote =
+    viewerPlayerId && targetVoterIds.includes(viewerPlayerId)
+      ? (voteByPlayer.get(viewerPlayerId) ?? null)
+      : null;
+
+  return c.json({
+    gameState: maskedGameState,
+    tableCardsHidden,
+    voteState: {
+      turn: currentTurn,
+      totalVoters: targetVoterIds.length,
+      submittedCount,
+      allVotesSubmitted,
+      forcedAllNeed,
+      eligibleReceiverPlayerIds,
+      needCount: forcedAllNeed ? targetVoterIds.length : needPlayerIds.length,
+      passCount: allVotesSubmitted
+        ? 0
+        : targetVoterIds.filter((playerId) => voteByPlayer.get(playerId) === false).length,
+      canVote: Boolean(viewerPlayerId && targetVoterIds.includes(viewerPlayerId)),
+      canResolve:
+        Boolean(isViewerCurrentPlayer && allVotesSubmitted && Array.isArray(data.table_cards) && data.table_cards.length > 0),
+      myVote,
+    },
+  });
 });
 
 // POST /api/rooms
@@ -413,6 +488,196 @@ app.post("/rooms/:roomId/delete", async (c) => {
   return c.json({ deleted: true });
 });
 
+// POST /api/rooms/:roomId/vote
+// 手番以外のプレイヤーが場カードへの意思表示(いる/いらない)を行うAPI
+app.post("/rooms/:roomId/vote", async (c) => {
+  const roomId = c.req.param("roomId");
+  const body = await parseJsonBody<VoteCardBody>(c.req.raw);
+  const playerId = body?.playerId;
+  const wantsCard = body?.wantsCard;
+
+  if (!playerId || typeof wantsCard !== "boolean") {
+    return c.json({ error: "playerId and wantsCard are required" }, 400);
+  }
+
+  const supabase = getSupabaseAdminClient();
+
+  const { data: gameState, error: gameStateError } = await supabase
+    .from("game_states")
+    .select("*")
+    .eq("room_id", roomId)
+    .single();
+  if (gameStateError || !gameState) {
+    return c.json({ error: "Game state not found" }, 404);
+  }
+
+  if (gameState.current_player_id === playerId) {
+    return c.json({ error: "Current turn player cannot vote" }, 409);
+  }
+
+  const { data: player, error: playerError } = await supabase
+    .from("players")
+    .select("id")
+    .eq("id", playerId)
+    .eq("room_id", roomId)
+    .maybeSingle();
+  if (playerError || !player) {
+    return c.json({ error: "Player not found in this room" }, 404);
+  }
+
+  const { error: upsertVoteError } = await supabase
+    .from("card_votes")
+    .upsert(
+      {
+        room_id: roomId,
+        turn: Number(gameState.turn),
+        voter_player_id: playerId,
+        wants_card: wantsCard,
+      },
+      { onConflict: "room_id,turn,voter_player_id" },
+    );
+  if (upsertVoteError) {
+    return c.json({ error: upsertVoteError.message }, 500);
+  }
+
+  return c.json({ success: true });
+});
+
+// POST /api/rooms/:roomId/resolve-table-card
+// 手番プレイヤーが場カードの受取先を確定してターンを進めるAPI
+app.post("/rooms/:roomId/resolve-table-card", async (c) => {
+  const roomId = c.req.param("roomId");
+  const body = await parseJsonBody<ResolveTableCardBody>(c.req.raw);
+  const playerId = body?.playerId;
+  const receiverPlayerId = body?.receiverPlayerId;
+
+  if (!playerId || !receiverPlayerId) {
+    return c.json({ error: "playerId and receiverPlayerId are required" }, 400);
+  }
+
+  const supabase = getSupabaseAdminClient();
+
+  const { data: gameState, error: gameStateError } = await supabase
+    .from("game_states")
+    .select("*")
+    .eq("room_id", roomId)
+    .single();
+  if (gameStateError || !gameState) {
+    return c.json({ error: "Game state not found" }, 404);
+  }
+
+  if (gameState.current_player_id !== playerId) {
+    return c.json({ error: "Only current turn player can resolve table card" }, 403);
+  }
+
+  const tableCards = Array.isArray(gameState.table_cards) ? gameState.table_cards : [];
+  const tableCard = tableCards[0];
+  if (typeof tableCard !== "number") {
+    return c.json({ error: "No resolvable table card" }, 409);
+  }
+
+  const { data: players, error: playersError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("room_id", roomId)
+    .order("joined_at", { ascending: true });
+  if (playersError || !players) {
+    return c.json({ error: playersError?.message ?? "Players not found" }, 500);
+  }
+
+  const currentTurn = Number(gameState.turn);
+  const targetVoterIds = players
+    .map((player) => player.id as string)
+    .filter((id) => id !== playerId);
+
+  const { data: voteRows, error: votesError } = await supabase
+    .from("card_votes")
+    .select("voter_player_id, wants_card")
+    .eq("room_id", roomId)
+    .eq("turn", currentTurn);
+  if (votesError) {
+    return c.json({ error: votesError.message }, 500);
+  }
+
+  const voteByPlayer = new Map<string, boolean>();
+  for (const vote of voteRows ?? []) {
+    voteByPlayer.set(vote.voter_player_id as string, Boolean(vote.wants_card));
+  }
+
+  const allVotesSubmitted = targetVoterIds.every((id) => voteByPlayer.has(id));
+  if (!allVotesSubmitted) {
+    return c.json({ error: "Cannot resolve before all non-turn players vote" }, 409);
+  }
+
+  const needPlayerIds = targetVoterIds.filter((id) => voteByPlayer.get(id) === true);
+  const forcedAllNeed = needPlayerIds.length === 0 && targetVoterIds.length > 0;
+  const eligibleReceiverPlayerIds = [
+    playerId,
+    ...(forcedAllNeed ? targetVoterIds : needPlayerIds),
+  ];
+
+  if (!eligibleReceiverPlayerIds.includes(receiverPlayerId)) {
+    return c.json({ error: "Receiver is not eligible for this turn" }, 409);
+  }
+
+  const receiver = players.find((player) => player.id === receiverPlayerId);
+  if (!receiver) {
+    return c.json({ error: "Receiver player not found" }, 404);
+  }
+
+  const currentCollectedCards = Array.isArray(receiver.collected_cards) ? receiver.collected_cards : [];
+  const { error: updateReceiverError } = await supabase
+    .from("players")
+    .update({ collected_cards: [...currentCollectedCards, tableCard] })
+    .eq("id", receiverPlayerId);
+  if (updateReceiverError) {
+    return c.json({ error: updateReceiverError.message }, 500);
+  }
+
+  const currentPlayerIndex = players.findIndex((player) => player.id === playerId);
+  const nextPlayer =
+    currentPlayerIndex >= 0 ? players[(currentPlayerIndex + 1) % players.length] : players[0];
+
+  const drawPile = Array.isArray(gameState.draw_pile) ? [...gameState.draw_pile] : [];
+  const nextTableCard = drawPile.pop();
+  const nextTableCards = typeof nextTableCard === "number" ? [nextTableCard] : [];
+  const currentEventLog = Array.isArray(gameState.event_log) ? gameState.event_log : [];
+  const receiverLabel = receiver.id === playerId ? `${receiver.name}(手番)` : receiver.name;
+  const voteModeLog = forcedAllNeed
+    ? "全員いらないのため、全員いる扱いで候補化"
+    : "いると答えたプレイヤーから選択";
+
+  const { data: updatedGameState, error: updateGameStateError } = await supabase
+    .from("game_states")
+    .update({
+      turn: currentTurn + 1,
+      current_player_id: nextPlayer?.id ?? playerId,
+      draw_pile: drawPile,
+      table_cards: nextTableCards,
+      event_log: [
+        ...currentEventLog,
+        `ターン${currentTurn}: ${receiverLabel} が場のカード ${tableCard} を受け取りました (${voteModeLog})`,
+      ],
+    })
+    .eq("room_id", roomId)
+    .select("*")
+    .single();
+  if (updateGameStateError) {
+    return c.json({ error: updateGameStateError.message }, 500);
+  }
+
+  const { error: deleteVotesError } = await supabase
+    .from("card_votes")
+    .delete()
+    .eq("room_id", roomId)
+    .eq("turn", currentTurn);
+  if (deleteVotesError) {
+    return c.json({ error: deleteVotesError.message }, 500);
+  }
+
+  return c.json({ success: true, gameState: updatedGameState });
+});
+
 // POST /api/rooms/:roomId/start
 // ゲーム開始API（rooms.statusをplayingに更新し、game_statesを初期化）
 app.post("/rooms/:roomId/start", async (c) => {
@@ -507,7 +772,6 @@ app.post("/rooms/:roomId/start", async (c) => {
         turn: 1,
         current_player_id: currentPlayerId,
         draw_pile: initialDeck,
-        discard_pile: [],
         table_cards: [firstTableCard],
         event_log: [`ゲームが開始されました (${new Date().toISOString()})`],
       },
