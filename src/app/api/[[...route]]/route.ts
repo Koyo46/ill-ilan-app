@@ -1072,6 +1072,11 @@ app.post("/rooms/:roomId/start", async (c) => {
     return c.json({ error: "At least one player is required" }, 400);
   }
 
+  // ゲーム開始条件は「満員」ではなく「最大人数以下」であれば開始可能
+  if (players.length > room.max_players) {
+    return c.json({ error: "Player count exceeds room capacity" }, 409);
+  }
+
   const randomPlayer = players[Math.floor(Math.random() * players.length)];
   const currentPlayerId =
     requestedCurrentPlayerId && players.some((player) => player.id === requestedCurrentPlayerId)
