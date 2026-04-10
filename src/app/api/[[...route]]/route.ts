@@ -224,7 +224,7 @@ app.get("/rooms/:roomId/game-state", async (c) => {
   const tableCards = Array.isArray(data.table_cards) ? data.table_cards : [];
   const drawPile = Array.isArray(data.draw_pile) ? data.draw_pile : [];
   const drawPileCompositionMap = new Map<number, number>();
-  for (const rawCard of drawPile) {
+  for (const rawCard of [...drawPile, ...tableCards]) {
     if (typeof rawCard !== "number") {
       continue;
     }
